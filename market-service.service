@@ -1,0 +1,31 @@
+[Unit]
+Description=Golang Market Service
+After=network.target
+
+[Service]
+Type=simple
+User=stockkask
+WorkingDirectory=/home/stockkask/golang-market-service
+ExecStart=/home/stockkask/golang-market-service/market-service
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=market-service
+
+# Environment variables
+Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/stockkask/golang-market-service
+
+# Allow binding to privileged ports (< 1024) without root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

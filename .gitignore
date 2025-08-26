@@ -1,0 +1,22 @@
+// credentials
+cloud_config.json
+
+//test file
+websocket_test_complete.html
+websocket_disconnect_test.js
+test_client.py
+performance_test.py
+
+// database
+stocks.db
+historical.db
+
+//logs
+*.log.*
+*.log
+
+//env
+.env
+
+//build
+golang-market-service
