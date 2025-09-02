@@ -1,296 +1,404 @@
-# Golang Market Service
+# Odin Streamer - Candlestick Extension
 
-High-performance market data streaming service migrated from Python to Golang with zero-latency broadcasting.
+A production-ready Go service that extends the existing Odin Streamer with real-time candlestick generation, synthetic candle creation, and comprehensive intraday data APIs.
 
-## Features
+## 🚀 Features
 
-- ✅ **10x Performance**: Zero-latency streaming with Golang's goroutines
-- 🚀 **No Database**: Dynamic symbol loading from API
-- 📡 **1000+ Clients**: Scalable WebSocket broadcasting
-- ⚡ **Sub-millisecond Latency**: 0.1-1ms response time
-- 🔓 **No Authentication**: Open WebSocket access
-- 🌐 **Universal Client Support**: Works with any WebSocket client
+- **Real-time Candle Generation**: Converts live ticks to 1-minute OHLCV candles with IST timezone support
+- **Synthetic Candle Creation**: Fills missing minutes with synthetic candles using last known price
+- **Historical Data Integration**: Fetches and fills gaps using IndiraTrade API with intelligent fill algorithm
+- **Redis Caching**: High-performance caching with pub/sub for live updates
+- **TimescaleDB Persistence**: Scalable time-series storage with hypertables
+- **WebSocket Streaming**: Extended with `init_data` and live candle events
+- **REST API**: Complete intraday data endpoints with metadata
+- **Market Hours Aware**: Respects Indian market hours (09:15-15:30 IST)
+- **Late Tick Handling**: Processes late ticks within 2-minute tolerance
 
-## Architecture
+## 📋 Prerequisites
 
-```
-Symbols API → Python B2C Bridge → Golang Stream Server → Multiple Clients
-(192.168.46.237:5000)    (Login/Subscribe)    (WebSocket + gRPC)    (1000+ clients)
-```
+- **Go 1.21+**
+- **Redis 6.0+** (for caching and pub/sub)
+- **TimescaleDB/PostgreSQL 12+** (for persistence)
+- **Python 3.8+** (for existing B2C bridge)
 
-### Hybrid Approach Benefits
-- **Python**: Handles B2C login/subscription (existing working code)
-- **Golang**: Handles high-performance streaming to clients
-- **Best of Both**: Reliability + Performance
+## 🛠️ Quick Setup
 
-## Quick Start
+### 1. Clone and Setup
 
-### Prerequisites
-- Go 1.21+
-- Python 3.8+
-- B2C API credentials in `cloud_config.json`
-
-### Installation
-
-1. **Clone and setup**:
 ```bash
-cd golang-market-service
+# Navigate to your existing odin-streamer directory
+cd odin-streamer
+
+# Install Go dependencies
 go mod tidy
+
+# Copy environment configuration
+cp .env.example .env
+
+# Edit .env with your specific values
+nano .env
 ```
 
-2. **Install Python dependencies**:
+### 2. Database Setup
+
+#### Redis Setup
 ```bash
-pip3 install pyotp python-dotenv asyncio
+# Install Redis (Ubuntu/Debian)
+sudo apt update
+sudo apt install redis-server
+
+# Start Redis
+sudo systemctl start redis-server
+sudo systemctl enable redis-server
+
+# Test Redis connection
+redis-cli ping
 ```
 
-3. **Setup B2C configuration** (create `cloud_config.json`):
-```json
-{
-  "api_url": "your_b2c_api_url",
-  "api_key": "your_api_key",
-  "user_id": "your_user_id",
-  "password": "your_password",
-  "totp_secret": "your_totp_secret"
-}
+#### TimescaleDB Setup
+```bash
+# Install TimescaleDB (Ubuntu/Debian)
+sudo apt install postgresql-12 postgresql-client-12
+sudo apt install timescaledb-postgresql-12
+
+# Create database
+sudo -u postgres createdb odin_candles
+
+# Enable TimescaleDB extension
+sudo -u postgres psql odin_candles -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+
+# Create user (optional)
+sudo -u postgres psql -c "CREATE USER odin_user WITH PASSWORD 'your_password';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE odin_candles TO odin_user;"
 ```
 
-### Running the Service
+### 3. Environment Configuration
+
+Update your `.env` file with the provided values:
 
 ```bash
+# Basic Configuration
+FORCE_REFRESH=false
+API_BASE_URL=https://uatdev.indiratrade.com/companies-details
+PYTHON_SCRIPT=b2c_bridge.py
+WS_PORT=8081
+STOCK_DB=stocks.db
+HISTORICAL_DB=historical.db
+HISTORICAL_API_URL=https://trading.indiratrade.com:3000
+
+# Database URLs
+TIMESCALE_URL=postgres://postgres:password@localhost:5432/odin_candles?sslmode=disable
+REDIS_URL=redis://localhost:6379/0
+```
+
+### 4. Run the Service
+
+```bash
+# Build and run
+go build -o odin-streamer .
+./odin-streamer
+
+# Or run directly
 go run main.go
 ```
 
-The service will:
-1. Fetch symbols from API (http://192.168.46.237:5000/symbols)
-2. Start Python B2C bridge for market data
-3. Launch WebSocket server on port 8080
-4. Begin zero-latency broadcasting
+## 📡 API Endpoints
 
-## API Endpoints
+### REST API
 
-### WebSocket Connection
-```
-ws://localhost:8080/stream?stocks=RELIANCE,TCS,INFY
-```
+#### Intraday Candles
+```bash
+# Get full day candles for a token
+GET /intraday/{exchange}/{scrip_token}
 
-**Parameters**:
-- `stocks`: Comma-separated list of stock symbols (optional)
-- Default stocks: RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK
-
-### Health Check
-```
-GET http://localhost:8080/health
+# Examples:
+curl "http://localhost:8081/intraday/NSE/2475"
+curl "http://localhost:8081/intraday/NSE/2475?date=2025-08-28"
+curl "http://localhost:8081/intraday/NSE/2475?force_refresh=true"
 ```
 
-Returns service statistics and health status.
+#### Health & Stats
+```bash
+# Health check
+GET /intraday/health
 
-## Message Format
+# API statistics
+GET /intraday/stats
 
-### Welcome Message
-```json
-{
-  "type": "welcome",
-  "message": "Connected to Zero Latency Market Stream",
-  "client_id": "ws_client_1",
-  "stocks": ["RELIANCE", "TCS"],
-  "timestamp": 1703123456789
-}
+# WebSocket diagnostics
+GET /api/websocket/diagnostics
 ```
 
-### Market Data
-```json
-{
-  "symbol": "RELIANCE",
-  "token": "2885",
-  "ltp": 2456.75,
-  "high": 2478.90,
-  "low": 2445.20,
-  "open": 2460.00,
-  "close": 2450.30,
-  "volume": 1234567,
-  "change": 0.26,
-  "week_52_high": 2800.00,
-  "week_52_low": 2100.00,
-  "prev_close": 2450.30,
-  "avg_volume_5d": 2000000,
-  "timestamp": 1703123456789
-}
-```
+### WebSocket API
 
-## Client Examples
-
-### JavaScript WebSocket Client
+#### Connection
 ```javascript
-const ws = new WebSocket('ws://localhost:8080/stream?stocks=RELIANCE,TCS');
+// Connect to WebSocket
+const ws = new WebSocket('ws://localhost:8081/stream?stocks=RELIANCE,TCS');
 
-ws.onmessage = function(event) {
+// Handle messages
+ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === 'welcome') {
-        console.log('Connected:', data.message);
-    } else {
-        console.log(`${data.symbol}: ₹${data.ltp} (${data.change}%)`);
+    
+    switch(data.type) {
+        case 'init_data':
+            // Full day candles on connect
+            console.log('Received init data:', data.candles);
+            break;
+            
+        case 'candle:update':
+            // Live candle update
+            console.log('Candle update:', data.candle);
+            break;
+            
+        case 'candle:close':
+            // Finalized minute candle
+            console.log('Candle closed:', data.candle);
+            break;
+            
+        case 'candle:patch':
+            // Late tick correction
+            console.log('Candle patched:', data.candle);
+            break;
     }
 };
 ```
 
-### Python WebSocket Client
-```python
-import asyncio
-import websockets
-import json
+## 🏗️ Architecture
 
-async def client():
-    uri = "ws://localhost:8080/stream?stocks=RELIANCE,TCS"
-    async with websockets.connect(uri) as websocket:
-        async for message in websocket:
-            data = json.loads(message)
-            if data.get('type') == 'welcome':
-                print(f"Connected: {data['message']}")
-            else:
-                print(f"{data['symbol']}: ₹{data['ltp']} ({data['change']}%)")
+### Core Components
 
-asyncio.run(client())
+```
+/cmd/streamer/           # Main server (extended)
+/internal/tick/          # Tick normalization & deduplication
+/internal/candle/        # Candle Engine (tick→candle aggregation)
+/internal/historical/    # IndiraTrade client + fill algorithm
+/internal/api/           # REST + WebSocket handlers
+/internal/storage/       # Redis + TimescaleDB adapters
+/migrations/             # TimescaleDB SQL migrations
 ```
 
-### curl WebSocket Test
+### Data Flow
+
+```
+Raw Ticks → Tick Normalizer → Candle Engine → Storage Layer
+                                     ↓
+WebSocket Clients ← Redis Pub/Sub ← Live Updates
+                                     ↓
+REST API ← Redis Cache ← TimescaleDB ← Persistence
+```
+
+### Candle JSON Format
+
+```json
+{
+  "exchange": "NSE_EQ",
+  "scrip_token": "2475",
+  "minute_ts": "2025-08-28T09:15:00+05:30",
+  "open": 100.00,
+  "high": 101.00,
+  "low": 99.50,
+  "close": 100.50,
+  "volume": 1250,
+  "source": "realtime|historical_api|synthetic"
+}
+```
+
+## 🔧 Configuration
+
+### Market Hours
+- **Market Open**: 09:15 IST
+- **Market Close**: 15:30 IST
+- **Timezone**: Asia/Kolkata (IST)
+
+### Redis Key Schema
+- `candles:{exchange}:{scrip_token}:{YYYYMMDD}` → Full-day minute candles
+- `intraday_latest:{exchange}:{scrip_token}` → Latest in-flight candle
+- PubSub: `intraday_updates:{exchange}:{scrip_token}` → Live updates
+
+### Performance Tuning
+
 ```bash
-# Install websocat first: cargo install websocat
-websocat "ws://localhost:8080/stream?stocks=RELIANCE,TCS"
+# Buffer Sizes (adjust based on load)
+TICK_NORMALIZER_BUFFER=2000000
+MARKET_DATA_BUFFER=5000000
+WS_CLIENT_BUFFER_SIZE=500000
+
+# Database Connections
+TIMESCALE_MAX_CONNECTIONS=25
+REDIS_POOL_SIZE=10
 ```
 
-## Performance Metrics
+## 🧪 Testing
 
-### Expected Performance
-- **Throughput**: 100K+ messages/second
-- **Latency**: 0.1-1ms per message
-- **Memory**: ~10MB base usage
-- **Clients**: 1000+ concurrent connections
-- **CPU**: <10% on modern hardware
+### Manual Testing
 
-### Monitoring
 ```bash
-# Check health endpoint
-curl http://localhost:8080/health
+# Test with sparse tick data
+curl "http://localhost:8081/intraday/NSE/2475?date=2025-08-28"
 
-# Monitor logs
-go run main.go | grep "📊 Service Stats"
+# Test WebSocket connection
+wscat -c "ws://localhost:8081/stream?stocks=RELIANCE"
+
+# Test health endpoints
+curl "http://localhost:8081/intraday/health"
+curl "http://localhost:8081/intraday/stats"
 ```
 
-## Project Structure
+### Acceptance Criteria Verification
 
+1. **Late Joiner Test**: Connect WebSocket at 13:31 IST
+   - Should receive continuous 09:15→now candles
+   - Missing minutes filled with synthetic candles
+
+2. **No Trade Instrument**: Request data for low-volume stock
+   - Should use previous-day close for synthetic candles
+   - Volume=0 for synthetic minutes
+
+3. **Live Updates**: Monitor WebSocket during market hours
+   - Should receive `candle:update` for current minute
+   - Should receive `candle:close` at minute boundaries
+
+## 📊 Monitoring
+
+### Health Checks
+```bash
+# Component health
+curl http://localhost:8081/intraday/health
+
+# Response:
+{
+  "status": "healthy",
+  "components": {
+    "redis": "healthy",
+    "timescale": "healthy",
+    "historical": "available"
+  }
+}
 ```
-golang-market-service/
-├── main.go                    # Main Golang service
-├── b2c_bridge.py             # Python B2C bridge
-├── go.mod                    # Go dependencies
-├── README.md                 # This file
-├── golang-market-service-migration-plan.md  # Migration details
-└── cloud_config.json        # B2C credentials (create this)
+
+### Performance Metrics
+```bash
+# API statistics
+curl http://localhost:8081/intraday/stats
+
+# WebSocket diagnostics
+curl http://localhost:8081/api/websocket/diagnostics
 ```
 
-## Migration Benefits
+### Logs
+```bash
+# Monitor logs for candle generation
+tail -f /var/log/odin-streamer.log | grep "Candle"
 
-### Performance Improvements
-- **10x Throughput**: 10K → 100K messages/second
-- **5x Lower Latency**: 1-5ms → 0.1-1ms
-- **5x Memory Efficiency**: 50MB → 10MB base
-- **10x More Clients**: 100+ → 1000+ concurrent
+# Monitor performance
+tail -f /var/log/odin-streamer.log | grep "Performance"
+```
 
-### Architecture Improvements
-- **No Database**: Removed SQLite dependency
-- **Dynamic Loading**: Real-time symbol fetching
-- **Zero Downtime**: Graceful shutdown handling
-- **Better Scaling**: Horizontal scaling ready
-
-## Troubleshooting
+## 🚨 Troubleshooting
 
 ### Common Issues
 
-1. **"No symbols loaded"**
-   - Check API endpoint: http://192.168.46.237:5000/symbols
-   - Verify network connectivity
-
-2. **"Python bridge failed"**
-   - Check `cloud_config.json` exists
-   - Verify B2C credentials
-   - Install Python dependencies
-
-3. **"WebSocket connection failed"**
-   - Check port 8080 is available
-   - Verify firewall settings
-
-### Debug Mode
+#### 1. Redis Connection Failed
 ```bash
-# Enable debug logging
-export DEBUG=true
-go run main.go
+# Check Redis status
+sudo systemctl status redis-server
+
+# Test connection
+redis-cli ping
+
+# Check configuration
+grep REDIS_URL .env
 ```
 
-### Health Check
+#### 2. TimescaleDB Connection Failed
 ```bash
-# Check service health
-curl -s http://localhost:8080/health | jq .
+# Check PostgreSQL status
+sudo systemctl status postgresql
+
+# Test connection
+psql -h localhost -U postgres -d odin_candles -c "SELECT version();"
+
+# Check TimescaleDB extension
+psql -h localhost -U postgres -d odin_candles -c "SELECT * FROM pg_extension WHERE extname='timescaledb';"
 ```
 
-## Production Deployment
+#### 3. Missing Candles
+```bash
+# Check historical API connectivity
+curl "https://trading.indiratrade.com:3000/v1/chart/data/NSE/2475/1/MIN/RELIANCE?from=2025-08-28%2009:15:00&to=2025-08-28%2015:30:00"
 
-### Docker Support (Future)
+# Check fill algorithm logs
+grep "Fill algorithm" /var/log/odin-streamer.log
+```
+
+#### 4. WebSocket Connection Issues
+```bash
+# Check WebSocket server
+curl http://localhost:8081/health
+
+# Test WebSocket connection
+wscat -c "ws://localhost:8081/stream?stocks=RELIANCE"
+
+# Check client diagnostics
+curl http://localhost:8081/api/websocket/diagnostics
+```
+
+## 🔄 Deployment
+
+### Production Checklist
+
+- [ ] Update `.env` with production values
+- [ ] Set up Redis cluster for high availability
+- [ ] Configure TimescaleDB with proper retention policies
+- [ ] Set up monitoring and alerting
+- [ ] Configure log rotation
+- [ ] Set up backup procedures
+- [ ] Test failover scenarios
+
+### Docker Deployment (Optional)
+
 ```dockerfile
 FROM golang:1.21-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o market-service main.go
+RUN go mod tidy && go build -o odin-streamer .
 
-FROM python:3.11-alpine
-RUN pip install pyotp python-dotenv asyncio
-COPY --from=builder /app/market-service /app/
-COPY b2c_bridge.py /app/
-WORKDIR /app
-CMD ["./market-service"]
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+COPY --from=builder /app/odin-streamer .
+COPY --from=builder /app/.env .
+CMD ["./odin-streamer"]
 ```
 
-### Kubernetes Deployment (Future)
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: golang-market-service
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: market-service
-  template:
-    metadata:
-      labels:
-        app: market-service
-    spec:
-      containers:
-      - name: market-service
-        image: market-service:latest
-        ports:
-        - containerPort: 8080
-```
+## 📈 Performance Benchmarks
 
-## Contributing
+### Expected Performance
+- **Tick Processing**: 100,000+ ticks/second
+- **WebSocket Clients**: 1,000+ concurrent connections
+- **API Response Time**: <50ms (cache hit), <500ms (cache miss)
+- **Memory Usage**: ~200MB base + ~1MB per 1000 active tokens
 
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open Pull Request
+### Scaling Recommendations
+- **Horizontal**: Multiple instances with Redis pub/sub
+- **Vertical**: Increase buffer sizes and connection pools
+- **Database**: TimescaleDB sharding for >10M candles/day
 
-## License
+## 🤝 Contributing
 
-This project is licensed under the MIT License.
+1. Follow existing code patterns and conventions
+2. Add comprehensive tests for new features
+3. Update documentation for API changes
+4. Ensure IST timezone handling throughout
+5. Test with sparse tick data scenarios
 
-## Support
+## 📄 License
 
-For support and questions:
-- Create an issue in the repository
-- Check the troubleshooting section
-- Review the migration plan document
+This project extends the existing Odin Streamer codebase. Please refer to the original license terms.
 
 ---
 
-**Note**: This service provides significant performance improvements over the Python version while maintaining full compatibility with existing clients.
+**Built with ❤️ for Indian Stock Markets**
+
+*Market Hours: 09:15 - 15:30 IST | Timezone: Asia/Kolkata*

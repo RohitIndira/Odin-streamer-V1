@@ -1,22 +1,91 @@
-// credentials
-cloud_config.json
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+odin-streamer
+market-service
 
-//test file
-websocket_test_complete.html
-websocket_disconnect_test.js
-test_client.py
-performance_test.py
+# Test binary, built with `go test -c`
+*.test
 
-// database
-stocks.db
-historical.db
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
 
-//logs
-*.log.*
-*.log
+# Dependency directories (remove the comment below to include it)
+# vendor/
 
-//env
+# Go workspace file
+go.work
+
+# Environment files
 .env
+*.env
+!.env.example
 
-//build
-golang-market-service
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Config files with sensitive data
+cloud_config.json
+config/cloud_config.json
+cmd/streamer/cloud_config.json
+
+# Temporary files
+*.tmp
+*.temp
+*.tar.gz
+
+# Node modules (if any)
+node_modules/
+
+# Redis dump
+dump.rdb
+
+# Service files
+*.service
