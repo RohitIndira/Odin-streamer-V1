@@ -16,12 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"golang-market-service/internal/api"
-	"golang-market-service/internal/bridge"
-	"golang-market-service/internal/candle"
-	"golang-market-service/internal/historical"
-	"golang-market-service/internal/stock"
-	"golang-market-service/internal/storage"
+	"github.com/RohitIndira/odin-streamer/internal/api"
+	"github.com/RohitIndira/odin-streamer/internal/stock"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
@@ -88,18 +84,11 @@ type Application struct {
 	config *Config
 
 	// Core components
-	stockDB        *stock.Database
-	redisAdapter   *storage.RedisAdapter
-	timescaleDB    *storage.TimescaleDBAdapter
-	candleEngine   *candle.CandleEngine
-	streamerBridge *bridge.StreamerBridge
-	week52Manager  *stock.Week52Manager
+	stockDB       *stock.Database
+	week52Manager *stock.Week52Manager
 
 	// API components
-	intradayAPI          *api.IntradayAPI
-	websocketAPI         *api.WebSocketHandler
 	enhancedWebSocketAPI *api.EnhancedWebSocketHandler
-	historicalClient     *historical.IndiraTradeClient
 
 	// Enhanced WebSocket for live streaming
 	wsUpgrader websocket.Upgrader
@@ -187,7 +176,7 @@ func main() {
 
 func loadConfig() *Config {
 	return &Config{
-		StockDBPath:   getEnvOrDefault("STOCK_DB", "cmd/streamer/stocks.db"),
+		StockDBPath:   getEnvOrDefault("STOCK_DB", "configs/stocks.db"),
 		RedisURL:      getEnvOrDefault("REDIS_URL", "redis://localhost:6379/0"),
 		TimescaleURL:  getEnvOrDefault("TIMESCALE_URL", "postgres://odin_user:odin_password@localhost:5432/odin_streamer?sslmode=disable"),
 		APIBaseURL:    getEnvOrDefault("API_BASE_URL", "https://uatdev.indiratrade.com/companies-details"),
@@ -232,56 +221,10 @@ func (app *Application) initializeComponents() error {
 		return fmt.Errorf("failed to initialize 52-week manager: %w", err)
 	}
 
-	// Initialize Redis adapter
-	log.Printf("🔴 Initializing Redis adapter...")
-	app.redisAdapter, err = storage.NewRedisAdapter(app.config.RedisURL)
-	if err != nil {
-		return fmt.Errorf("failed to initialize Redis adapter: %w", err)
-	}
-
-	// Initialize TimescaleDB adapter
-	log.Printf("🐘 Initializing TimescaleDB adapter...")
-	app.timescaleDB, err = storage.NewTimescaleDBAdapter(app.config.TimescaleURL)
-	if err != nil {
-		return fmt.Errorf("failed to initialize TimescaleDB adapter: %w", err)
-	}
-
-	// Initialize candle engine
-	log.Printf("🕯️ Initializing candle engine...")
-	app.candleEngine, err = candle.NewCandleEngine()
-	if err != nil {
-		return fmt.Errorf("failed to initialize candle engine: %w", err)
-	}
-
-	// Initialize streamer bridge
-	log.Printf("🌉 Initializing streamer bridge...")
-	app.streamerBridge, err = bridge.NewStreamerBridge(app.redisAdapter, app.timescaleDB)
-	if err != nil {
-		return fmt.Errorf("failed to initialize streamer bridge: %w", err)
-	}
-
-	// Initialize historical client
-	log.Printf("📈 Initializing historical client...")
-	app.historicalClient, err = historical.NewIndiraTradeClient(app.config.HistoricalURL)
-	if err != nil {
-		return fmt.Errorf("failed to initialize historical client: %w", err)
-	}
-
-	// Initialize API components
-	log.Printf("🌐 Initializing API components...")
-	app.intradayAPI, err = api.NewIntradayAPI(app.redisAdapter, app.timescaleDB, app.historicalClient)
-	if err != nil {
-		return fmt.Errorf("failed to initialize intraday API: %w", err)
-	}
-
-	app.websocketAPI, err = api.NewWebSocketHandler(app.redisAdapter, app.timescaleDB, app.historicalClient, app.stockDB)
-	if err != nil {
-		return fmt.Errorf("failed to initialize WebSocket handler: %w", err)
-	}
-
-	// Initialize enhanced WebSocket handler
+	// Initialize enhanced WebSocket handler with adapter
 	log.Printf("🌐 Initializing enhanced WebSocket handler...")
-	app.enhancedWebSocketAPI, err = api.NewEnhancedWebSocketHandler(app.redisAdapter, app.timescaleDB, app.historicalClient, app.stockDB)
+	week52Adapter := &Week52ManagerAdapter{manager: app.week52Manager}
+	app.enhancedWebSocketAPI, err = api.NewEnhancedWebSocketHandler(app.stockDB, week52Adapter)
 	if err != nil {
 		return fmt.Errorf("failed to initialize enhanced WebSocket handler: %w", err)
 	}
@@ -437,16 +380,8 @@ func (app *Application) ensure52WeekDataComplete() error {
 func (app *Application) startCoreComponents() error {
 	log.Printf("⚡ Starting core components...")
 
-	// Start streamer bridge
-	if err := app.streamerBridge.Start(); err != nil {
-		return fmt.Errorf("failed to start streamer bridge: %w", err)
-	}
-
-	// Setup candle engine callbacks
-	app.candleEngine.SetPublishCallback(func(update candle.CandleUpdate) error {
-		app.websocketAPI.BroadcastCandleUpdate(update)
-		return nil
-	})
+	// 52-week manager is ready (no background tasks needed)
+	log.Printf("📈 52-week manager is ready for live updates")
 
 	log.Printf("✅ Core components started")
 	return nil
@@ -608,33 +543,6 @@ func (app *Application) processLiveMarketData(data map[string]interface{}) {
 		percentChange = ((ltp - prevClose) / prevClose) * 100
 	}
 
-	// Create market data for StreamerBridge
-	marketData := bridge.MarketData{
-		Symbol:        symbol,
-		Token:         token,
-		LTP:           ltp,
-		High:          high,
-		Low:           low,
-		Open:          open,
-		Close:         close,
-		Volume:        volume,
-		PercentChange: percentChange,
-		Week52High:    week52Data.Week52High,
-		Week52Low:     week52Data.Week52Low,
-		PrevClose:     prevClose,
-		AvgVolume5D:   volume, // Use current volume as estimate
-		Timestamp:     timestamp,
-	}
-
-	// Feed data into StreamerBridge for candle processing
-	select {
-	case app.streamerBridge.GetMarketDataChannel() <- marketData:
-		// Successfully sent to bridge
-	default:
-		// Channel full, skip this tick
-		log.Printf("⚠️ StreamerBridge channel full, skipping tick for %s", symbol)
-	}
-
 	// Create comprehensive live market data for WebSocket broadcasting
 	liveData := LiveMarketData{
 		Symbol:          symbol,
@@ -669,10 +577,27 @@ func (app *Application) broadcastLiveData(data LiveMarketData) {
 	// Broadcast to enhanced WebSocket clients (with market hours control and subscriptions)
 	app.enhancedWebSocketAPI.BroadcastMarketData(data.Token, data.Symbol, data.Exchange, data)
 
-	// Broadcast to legacy WebSocket clients
+	// Broadcast to legacy WebSocket clients with proper concurrency handling
 	app.wsMutex.RLock()
-	defer app.wsMutex.RUnlock()
+	if len(app.wsClients) == 0 {
+		app.wsMutex.RUnlock()
+		return
+	}
 
+	// Create a snapshot of clients to avoid holding the lock during broadcast
+	clientSnapshot := make([]*WSClient, 0, len(app.wsClients))
+	for _, client := range app.wsClients {
+		if client.isAlive {
+			clientSnapshot = append(clientSnapshot, client)
+		}
+	}
+	app.wsMutex.RUnlock()
+
+	if len(clientSnapshot) == 0 {
+		return
+	}
+
+	// Prepare messages once
 	message := WebSocketMessage{
 		Type:      "live_market_data",
 		Symbol:    data.Symbol,
@@ -682,6 +607,7 @@ func (app *Application) broadcastLiveData(data LiveMarketData) {
 		Timestamp: time.Now().UnixMilli(),
 	}
 
+	var recordMessage *WebSocketMessage
 	// Special message for new 52-week records
 	if data.IsNewWeek52High || data.IsNewWeek52Low {
 		recordType := "new_52_week_record"
@@ -693,7 +619,7 @@ func (app *Application) broadcastLiveData(data LiveMarketData) {
 			recordType = "new_52_week_low"
 		}
 
-		recordMessage := WebSocketMessage{
+		recordMessage = &WebSocketMessage{
 			Type:      recordType,
 			Symbol:    data.Symbol,
 			Token:     data.Token,
@@ -701,28 +627,99 @@ func (app *Application) broadcastLiveData(data LiveMarketData) {
 			Data:      data,
 			Timestamp: time.Now().UnixMilli(),
 		}
+	}
 
-		// Broadcast record message first
-		for conn, client := range app.wsClients {
-			if client.isAlive && (len(client.subscribedTokens) == 0 || client.subscribedTokens[data.Token]) {
-				client.mutex.Lock()
-				if err := conn.WriteJSON(recordMessage); err != nil {
-					client.isAlive = false
-				}
-				client.mutex.Unlock()
+	// Use worker pool for concurrent broadcasting to handle 1M clients
+	const maxWorkers = 100
+	clientChan := make(chan *WSClient, len(clientSnapshot))
+	var wg sync.WaitGroup
+
+	// Start worker goroutines
+	for i := 0; i < maxWorkers && i < len(clientSnapshot); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for client := range clientChan {
+				app.sendToClient(client, &message, recordMessage, data.Token)
 			}
+		}()
+	}
+
+	// Send clients to workers
+	for _, client := range clientSnapshot {
+		clientChan <- client
+	}
+	close(clientChan)
+
+	// Wait for all workers to complete
+	wg.Wait()
+
+	// Clean up dead connections in a separate goroutine to avoid blocking
+	go app.cleanupDeadConnections()
+}
+
+// sendToClient handles sending messages to a single client with proper error handling
+func (app *Application) sendToClient(client *WSClient, message *WebSocketMessage, recordMessage *WebSocketMessage, token string) {
+	// Check if client is still alive
+	if !client.isAlive {
+		return
+	}
+
+	// Check subscription (fast check without lock if possible)
+	if len(client.subscribedTokens) > 0 && !client.subscribedTokens[token] {
+		return
+	}
+
+	// Use a single lock for both messages to avoid race conditions
+	client.mutex.Lock()
+	defer client.mutex.Unlock()
+
+	// Double-check client is still alive after acquiring lock
+	if !client.isAlive {
+		return
+	}
+
+	// Set generous write deadline for persistent connections
+	deadline := time.Now().Add(30 * time.Second) // Increased from 2 seconds to 30 seconds
+	client.conn.SetWriteDeadline(deadline)
+
+	// Send 52-week record message first if exists
+	if recordMessage != nil {
+		if err := client.conn.WriteJSON(recordMessage); err != nil {
+			client.isAlive = false
+			return
 		}
 	}
 
-	// Broadcast regular market data
+	// Send regular market data
+	if err := client.conn.WriteJSON(message); err != nil {
+		client.isAlive = false
+		return
+	}
+}
+
+// cleanupDeadConnections removes dead connections in a separate goroutine
+func (app *Application) cleanupDeadConnections() {
+	app.wsMutex.Lock()
+	defer app.wsMutex.Unlock()
+
+	clientsToRemove := make([]*websocket.Conn, 0)
+
 	for conn, client := range app.wsClients {
-		if client.isAlive && (len(client.subscribedTokens) == 0 || client.subscribedTokens[data.Token]) {
-			client.mutex.Lock()
-			if err := conn.WriteJSON(message); err != nil {
-				client.isAlive = false
-			}
-			client.mutex.Unlock()
+		if !client.isAlive {
+			clientsToRemove = append(clientsToRemove, conn)
 		}
+	}
+
+	if len(clientsToRemove) > 0 {
+		for _, conn := range clientsToRemove {
+			if _, exists := app.wsClients[conn]; exists {
+				delete(app.wsClients, conn)
+				conn.Close()
+			}
+		}
+		log.Printf("🧹 Cleaned up %d dead WebSocket connections. Active clients: %d",
+			len(clientsToRemove), len(app.wsClients))
 	}
 }
 
@@ -735,20 +732,11 @@ func (app *Application) setupRoutes() {
 	// Enhanced WebSocket with persistent connections and dynamic subscriptions
 	mux.HandleFunc("/enhanced-stream", app.enhancedWebSocketAPI.HandleEnhancedWebSocket)
 
-	// Original API routes
+	// API routes
 	mux.HandleFunc("/api/health", app.handleHealth)
 	mux.HandleFunc("/api/stocks/stats", app.handleStockStats)
 	mux.HandleFunc("/api/stocks/refresh", app.handleStockRefresh)
 	mux.HandleFunc("/api/52week/stats", app.handle52WeekStats)
-	mux.HandleFunc("/api/enhanced/stats", app.handleEnhancedStats)
-
-	// Intraday API routes
-	mux.HandleFunc("/intraday/", app.intradayAPI.HandleIntradayRequest)
-	mux.HandleFunc("/intraday/stats", app.intradayAPI.HandleIntradayStats)
-	mux.HandleFunc("/intraday/health", app.intradayAPI.HandleIntradayHealth)
-
-	// Original WebSocket for candles
-	mux.HandleFunc("/stream", app.websocketAPI.HandleWebSocket)
 
 	// Root endpoint
 	mux.HandleFunc("/", app.handleRoot)
@@ -758,10 +746,11 @@ func (app *Application) setupRoutes() {
 		Handler: mux,
 	}
 
-	log.Printf("✅ Enhanced HTTP routes configured")
+	log.Printf("✅ HTTP routes configured")
 }
 
 func (app *Application) handleLiveStream(w http.ResponseWriter, r *http.Request) {
+	// Set connection timeout and keep-alive settings
 	conn, err := app.wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("❌ WebSocket upgrade failed: %v", err)
@@ -769,47 +758,158 @@ func (app *Application) handleLiveStream(w http.ResponseWriter, r *http.Request)
 	}
 	defer conn.Close()
 
-	// Parse optional stocks parameter
-	stocksParam := r.URL.Query().Get("stocks")
+	// Set very long timeouts for persistent connections
+	conn.SetReadDeadline(time.Now().Add(24 * time.Hour))    // 24 hours instead of 60 seconds
+	conn.SetWriteDeadline(time.Now().Add(30 * time.Second)) // 30 seconds instead of 10
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(24 * time.Hour)) // Reset to 24 hours on pong
+		return nil
+	})
+
+	// Parse subscription parameters
+	tokensParam := r.URL.Query().Get("tokens") // 🚀 NEW: Direct token subscription
+	stocksParam := r.URL.Query().Get("stocks") // 🐌 OLD: Symbol-based subscription (fallback)
+	allParam := r.URL.Query().Get("all")       // 🌟 NEW: Subscribe to ALL tokens
+
+	// Generate unique client ID for tracking
+	clientID := fmt.Sprintf("client_%d_%d", time.Now().UnixNano(), len(app.wsClients))
 
 	client := &WSClient{
 		conn:              conn,
 		subscribedTokens:  make(map[string]bool),
 		subscribedSymbols: make(map[string]bool),
+		clientID:          clientID,
 		lastPing:          time.Now(),
 		isAlive:           true,
 	}
 
-	// Subscribe to specific stocks if provided
-	if stocksParam != "" {
-		stockSymbols := strings.Split(strings.ToUpper(stocksParam), ",")
-		for _, symbol := range stockSymbols {
-			if token, exists := app.stockDB.GetTokenForSymbol(symbol); exists {
+	// 🌟 NEW: Subscribe to ALL tokens (highest priority)
+	if allParam == "true" || allParam == "1" || strings.ToUpper(allParam) == "ALL" {
+		// Get all tokens that we subscribed to at startup
+		allTokens, err := app.stockDB.GetAllTokenExchangePairs()
+		if err != nil {
+			log.Printf("⚠️ Failed to get all tokens for client %s: %v", clientID, err)
+		} else {
+			for _, tokenPair := range allTokens {
+				if strings.Contains(tokenPair, ":") {
+					token := strings.Split(tokenPair, ":")[0]
+					client.subscribedTokens[token] = true
+
+					// Also add symbol for tracking
+					if symbol, _, exists := app.stockDB.GetSymbolForToken(token); exists {
+						client.subscribedSymbols[symbol] = true
+					}
+				}
+			}
+			log.Printf("🌟 WebSocket client %s subscribed to ALL %d tokens", clientID, len(client.subscribedTokens))
+		}
+	} else if tokensParam != "" {
+		// 🚀 NEW: Fast token-based subscription
+		tokens := strings.Split(tokensParam, ",")
+		validTokens := []string{}
+		for _, token := range tokens {
+			token = strings.TrimSpace(token)
+			if token != "" {
 				client.subscribedTokens[token] = true
+				validTokens = append(validTokens, token)
+
+				// Also add symbol for tracking (optional)
+				if symbol, _, exists := app.stockDB.GetSymbolForToken(token); exists {
+					client.subscribedSymbols[symbol] = true
+				}
 			}
 		}
-		log.Printf("🔌 WebSocket client connected with subscriptions: %v", stockSymbols)
+		log.Printf("🚀 FAST: WebSocket client %s subscribed to %d tokens directly: %v", clientID, len(validTokens), validTokens)
+	} else if stocksParam != "" {
+		// 🐌 OLD: Symbol-based subscription (fallback for backward compatibility)
+		stockSymbols := strings.Split(strings.ToUpper(stocksParam), ",")
+		validSymbols := []string{}
+		for _, symbol := range stockSymbols {
+			symbol = strings.TrimSpace(symbol)
+			if symbol != "" {
+				if token, exists := app.stockDB.GetTokenForSymbol(symbol); exists {
+					client.subscribedTokens[token] = true
+					client.subscribedSymbols[symbol] = true
+					validSymbols = append(validSymbols, symbol)
+				}
+			}
+		}
+		log.Printf("🐌 SLOW: WebSocket client %s used symbol lookup for %d stocks: %v", clientID, len(validSymbols), validSymbols)
 	} else {
-		log.Printf("🔌 WebSocket client connected for all market data")
+		log.Printf("🔌 WebSocket client %s connected with no specific subscriptions (will receive no data)", clientID)
 	}
 
 	// Register client
 	app.wsMutex.Lock()
 	app.wsClients[conn] = client
+	totalClients := len(app.wsClients)
 	app.wsMutex.Unlock()
 
-	// Send welcome message
+	log.Printf("📊 Total WebSocket clients: %d", totalClients)
+
+	// Send welcome message with new features
+	subscriptionType := "none"
+	if allParam != "" {
+		subscriptionType = "all_tokens"
+	} else if tokensParam != "" {
+		subscriptionType = "token_based"
+	} else if stocksParam != "" {
+		subscriptionType = "symbol_based"
+	}
+
 	welcomeMsg := WebSocketMessage{
 		Type: "welcome",
 		Data: map[string]interface{}{
-			"message":      "Connected to Odin Streamer Live Market Data",
-			"features":     []string{"live_market_data", "52_week_records", "candles", "real_time_updates"},
-			"subscribed":   len(client.subscribedTokens) > 0,
-			"total_stocks": len(client.subscribedTokens),
+			"message":           "Connected to Odin Streamer Live Market Data v2.0",
+			"client_id":         clientID,
+			"features":          []string{"live_market_data", "52_week_records", "token_subscription", "all_tokens_stream", "real_time_updates", "persistent_connection"},
+			"subscription_type": subscriptionType,
+			"subscribed":        len(client.subscribedTokens) > 0,
+			"total_stocks":      len(client.subscribedTokens),
+			"keep_alive":        true,
+			"new_features": map[string]string{
+				"token_subscription": "?tokens=476,11536,1594 (FAST - direct token numbers)",
+				"all_tokens":         "?all=true (streams ALL tokens from startup)",
+				"symbol_fallback":    "?stocks=RELIANCE,TCS (SLOW - backward compatibility)",
+			},
 		},
 		Timestamp: time.Now().UnixMilli(),
 	}
-	conn.WriteJSON(welcomeMsg)
+
+	if err := conn.WriteJSON(welcomeMsg); err != nil {
+		log.Printf("❌ Failed to send welcome message to client %s: %v", clientID, err)
+		return
+	}
+
+	// Start ping/pong keep-alive mechanism
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
+	// Start goroutine for ping/pong
+	go func() {
+		for {
+			select {
+			case <-pingTicker.C:
+				client.mutex.Lock()
+				if !client.isAlive {
+					client.mutex.Unlock()
+					return
+				}
+
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+					log.Printf("⚠️ Failed to send ping to client %s: %v", clientID, err)
+					client.isAlive = false
+					client.mutex.Unlock()
+					return
+				}
+				client.mutex.Unlock()
+
+			case <-app.ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Handle client messages
 	app.handleWSClientMessages(client)
@@ -817,50 +917,98 @@ func (app *Application) handleLiveStream(w http.ResponseWriter, r *http.Request)
 	// Cleanup on disconnect
 	app.wsMutex.Lock()
 	delete(app.wsClients, conn)
+	remainingClients := len(app.wsClients)
 	app.wsMutex.Unlock()
 
-	log.Printf("🔌 WebSocket client disconnected")
+	log.Printf("🔌 WebSocket client %s disconnected. Remaining clients: %d", clientID, remainingClients)
 }
 
 func (app *Application) handleWSClientMessages(client *WSClient) {
+	defer func() {
+		client.mutex.Lock()
+		client.isAlive = false
+		client.mutex.Unlock()
+	}()
+
+	// Set up message reading with timeout
 	for {
+		// Reset read deadline for each message
+		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 		var rawMsg map[string]interface{}
 		err := client.conn.ReadJSON(&rawMsg)
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("⚠️ WebSocket error: %v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				log.Printf("⚠️ WebSocket error for client %s: %v", client.clientID, err)
+			} else {
+				log.Printf("🔌 WebSocket client %s disconnected normally", client.clientID)
 			}
 			break
 		}
 
+		// Update last activity
+		client.mutex.Lock()
+		client.lastPing = time.Now()
+		client.mutex.Unlock()
+
 		msgType, ok := rawMsg["type"].(string)
 		if !ok {
+			log.Printf("⚠️ Invalid message format from client %s: missing type", client.clientID)
 			continue
 		}
 
-		switch msgType {
-		case "ping":
-			client.lastPing = time.Now()
-			pongMsg := WebSocketMessage{
-				Type:      "pong",
-				Timestamp: time.Now().UnixMilli(),
+		// Process message with error handling
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("❌ Panic handling message from client %s: %v", client.clientID, r)
+				}
+			}()
+
+			switch msgType {
+			case "ping":
+				client.mutex.Lock()
+				client.lastPing = time.Now()
+				client.mutex.Unlock()
+
+				pongMsg := WebSocketMessage{
+					Type:      "pong",
+					Timestamp: time.Now().UnixMilli(),
+				}
+
+				client.mutex.Lock()
+				client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := client.conn.WriteJSON(pongMsg); err != nil {
+					log.Printf("⚠️ Failed to send pong to client %s: %v", client.clientID, err)
+					client.isAlive = false
+				}
+				client.mutex.Unlock()
+
+			case "subscribe":
+				app.handleSubscription(client, rawMsg, true)
+
+			case "unsubscribe":
+				app.handleSubscription(client, rawMsg, false)
+
+			case "list_subscriptions":
+				app.handleListSubscriptions(client)
+
+			case "heartbeat":
+				// Simple heartbeat acknowledgment
+				client.mutex.Lock()
+				client.lastPing = time.Now()
+				heartbeatMsg := WebSocketMessage{
+					Type:      "heartbeat_ack",
+					Timestamp: time.Now().UnixMilli(),
+				}
+				client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				client.conn.WriteJSON(heartbeatMsg)
+				client.mutex.Unlock()
+
+			default:
+				log.Printf("⚠️ Unknown message type from client %s: %s", client.clientID, msgType)
 			}
-			client.mutex.Lock()
-			client.conn.WriteJSON(pongMsg)
-			client.mutex.Unlock()
-
-		case "subscribe":
-			app.handleSubscription(client, rawMsg, true)
-
-		case "unsubscribe":
-			app.handleSubscription(client, rawMsg, false)
-
-		case "list_subscriptions":
-			app.handleListSubscriptions(client)
-
-		default:
-			log.Printf("⚠️ Unknown message type: %s", msgType)
-		}
+		}()
 	}
 }
 
@@ -1044,26 +1192,9 @@ func (app *Application) Stop() error {
 		app.pythonProcess.Wait()
 	}
 
-	// Stop core components
-	if app.streamerBridge != nil {
-		app.streamerBridge.Stop()
-	}
-
-	if app.candleEngine != nil {
-		app.candleEngine.Close()
-	}
-
 	// Close database connections
 	if app.stockDB != nil {
 		app.stockDB.Close()
-	}
-
-	if app.redisAdapter != nil {
-		app.redisAdapter.Close()
-	}
-
-	if app.timescaleDB != nil {
-		app.timescaleDB.Close()
 	}
 
 	app.wg.Wait()
@@ -1091,12 +1222,32 @@ func (app *Application) handleRoot(w http.ResponseWriter, r *http.Request) {
 			"Historical data API",
 		},
 		"endpoints": map[string]string{
-			"live_stream":   "/live-stream (WebSocket)",
-			"candle_stream": "/stream?stocks=SYMBOL1,SYMBOL2 (WebSocket)",
-			"health":        "/api/health",
-			"stock_stats":   "/api/stocks/stats",
-			"intraday_data": "/intraday/{exchange}/{token}",
-			"52week_stats":  "/api/52week/stats",
+			"live_stream":         "/live-stream (WebSocket)",
+			"token_subscription":  "/live-stream?tokens=476,11536,1594 (FAST - WebSocket)",
+			"all_tokens_stream":   "/live-stream?all=true (ALL tokens - WebSocket)",
+			"symbol_subscription": "/live-stream?stocks=RELIANCE,TCS (SLOW - WebSocket)",
+			"enhanced_stream":     "/enhanced-stream (WebSocket)",
+			"health":              "/api/health",
+			"stock_stats":         "/api/stocks/stats",
+			"intraday_data":       "/intraday/{exchange}/{token}",
+			"52week_stats":        "/api/52week/stats",
+		},
+		"subscription_methods": map[string]interface{}{
+			"token_based": map[string]string{
+				"url":         "/live-stream?tokens=476,11536,1594",
+				"performance": "FASTEST - Direct token numbers",
+				"example":     "wscat -c 'ws://localhost:8080/live-stream?tokens=476,11536,1594'",
+			},
+			"all_tokens": map[string]string{
+				"url":         "/live-stream?all=true",
+				"performance": "FAST - All available tokens",
+				"example":     "wscat -c 'ws://localhost:8080/live-stream?all=true'",
+			},
+			"symbol_based": map[string]string{
+				"url":         "/live-stream?stocks=RELIANCE,TCS,INFY",
+				"performance": "SLOWER - Requires symbol lookup",
+				"example":     "wscat -c 'ws://localhost:8080/live-stream?stocks=RELIANCE,TCS'",
+			},
 		},
 		"websocket_clients": len(app.wsClients),
 	}
@@ -1168,14 +1319,38 @@ func (app *Application) handle52WeekStats(w http.ResponseWriter, r *http.Request
 
 func (app *Application) handleEnhancedStats(w http.ResponseWriter, r *http.Request) {
 	enhancedStats := app.enhancedWebSocketAPI.GetStats()
-	streamerStats := app.streamerBridge.GetStats()
 
 	response := map[string]interface{}{
 		"enhanced_websocket": enhancedStats,
-		"streamer_bridge":    streamerStats,
 		"timestamp":          time.Now().Format(time.RFC3339),
 	}
 	writeJSON(w, response)
+}
+
+// Week52ManagerAdapter adapts stock.Week52Manager to api.Week52Manager interface
+type Week52ManagerAdapter struct {
+	manager *stock.Week52Manager
+}
+
+// GetWeek52Data adapts the method to return api.Week52Data
+func (w *Week52ManagerAdapter) GetWeek52Data(symbol, exchange string) (*api.Week52Data, error) {
+	stockData, err := w.manager.GetWeek52Data(symbol, exchange)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert stock.Week52Data to api.Week52Data
+	return &api.Week52Data{
+		Symbol:         stockData.Symbol,
+		Token:          stockData.Token,
+		Exchange:       stockData.Exchange,
+		Week52High:     stockData.Week52High,
+		Week52Low:      stockData.Week52Low,
+		Week52HighDate: stockData.Week52HighDate,
+		Week52LowDate:  stockData.Week52LowDate,
+		LastClose:      stockData.LastClose,
+		UpdatedAt:      stockData.UpdatedAt,
+	}, nil
 }
 
 // Utility functions

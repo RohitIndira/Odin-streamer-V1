@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"golang-market-service/internal/stock"
+	"github.com/RohitIndira/odin-streamer/internal/stock"
 
 	_ "github.com/mattn/go-sqlite3"
 )

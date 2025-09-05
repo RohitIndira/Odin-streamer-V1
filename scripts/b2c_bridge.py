@@ -290,8 +290,10 @@ class B2CBridge:
 def load_b2c_config():
     """Load B2C configuration"""
     config_paths = [
+        "configs/cloud_config.json",  # New centralized config location
         "config/cloud_config.json",
         "cloud_config.json",
+        "../configs/cloud_config.json",
         "../config/cloud_config.json",
         "../cloud_config.json",
         "../../cloud_config.json",

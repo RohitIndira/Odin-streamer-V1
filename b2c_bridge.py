@@ -1,1 +1,0 @@
-scripts/b2c_bridge.py
